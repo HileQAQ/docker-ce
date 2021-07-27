@@ -146,7 +146,7 @@ func CreateDeviceAndMount(dir, configPath, mountPoint string) (retErr error) {
 	return fmt.Errorf("failed to get device and mount for %s", dir)
 }
 
-func (di *DadiIscsiDev) UnmountAndDestoryDev(dir, mountPoint string) error {
+func UnmountAndDestoryDev(dir, mountPoint string) error {
 	idStr, _ := getTrimStringFromFile(path.Join(dir, "devid"))
 	naaStr, _ := getTrimStringFromFile(path.Join(dir, "devnaa"))
 

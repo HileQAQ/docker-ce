@@ -4,26 +4,50 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"os"
+	"os/exec"
+	"strconv"
+
+	// "os"
 	"path"
 	"strings"
 
-	"github.com/docker/docker/pkg/fileutils"
+	"github.com/opencontainers/go-digest"
+	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
+	// "github.com/docker/docker/pkg/fileutils"
 	"github.com/docker/docker/pkg/idtools"
 )
 
+var mylog *MyLog
+
+type DevConfigLower struct {
+	Dir    string        `json:"dir,omitempty"`
+	Digest digest.Digest `json:"digest,omitempty"`
+	Size   uint64        `json:"size,omitempty"`
+}
+type DevConfigUpper struct {
+	Index string `json:"index"`
+	Data  string `json:"data"`
+}
+type DevConfig struct {
+	RepoBlobURL string           `json:"repoBlobUrl"`
+	Lowers      []DevConfigLower `json:"lowers"`
+	Upper       DevConfigUpper   `json:"upper,omitempty"`
+	ResultFile  string           `json:"resultFile"`
+}
 
 const (
-	overlaybdBaseLayerDir  = "/opt/overlaybd/baselayers"
-	overlaybdCreate        = "/opt/overlaybd/bin/overlaybd-create"
-	dataFile               = ".data_file"  //top layer data file for lsmd
-	idxFile                = ".data_index" //top layer index file for lsmd
-	iNewFormat          = ".aaaaaaaaaaaaaaaa.lsmt"
-	zdfsChecksumFile    = ".checksum_file"
-	zdfsOssurlFile      = ".oss_url"
-	zdfsOssDataSizeFile = ".data_size"
-	zdfsOssTypeFile     = ".type"
-	zdfsBaseLayer = "/opt/lsmd/zdfsBaseLayer"
+	overlaybdBaseLayerDir = "/opt/overlaybd/baselayers"
+	overlaybdCreate       = "/opt/overlaybd/bin/overlaybd-create"
+	dataFile              = ".data_file"  //top layer data file for lsmd
+	idxFile               = ".data_index" //top layer index file for lsmd
+	iNewFormat            = ".aaaaaaaaaaaaaaaa.lsmt"
+	zdfsChecksumFile      = ".checksum_file"
+	zdfsOssurlFile        = ".oss_url"
+	zdfsOssDataSizeFile   = ".data_size"
+	zdfsOssTypeFile       = ".type"
+	zdfsMetaDir           = "zdfsmeta"
+	zdfsBaseLayer         = "/opt/lsmd/zdfsBaseLayer"
 )
 
 func IsZdfsLayerInApplyDiff(idDir, parent, parentDir string) bool {
@@ -47,7 +71,7 @@ func ApplyDiff(idDir, parent string, rootUID, rootGID int) error {
 	if err := idtools.MkdirAndChown(metaDir, 0755, idtools.Identity{UID: rootUID, GID: rootGID}); err != nil {
 		return err
 	}
-	if err := copyMetaFiles(getDiffDir(dir), metaDir); err != nil {
+	if err := copyMetaFiles(getDiffDir(idDir), metaDir); err != nil {
 		return err
 	}
 
@@ -80,18 +104,19 @@ func ApplyDiff(idDir, parent string, rootUID, rootGID int) error {
 	if err != nil {
 		return err
 	}
-	size := strconv.ParseUint(str, 10, 64)
+	size, _ := strconv.ParseUint(str, 10, 64)
 
 	if configJSON.RepoBlobURL == "" {
 		configJSON.RepoBlobURL = url[0:idx]
 	}
-	configJSON.Lowers = append(configJSON.Lowers, OverlayBDBSConfigLower{
-		Digest: url[idx+1:],
+	lowerDigest, _ := digest.Parse(url[idx+1:])
+	configJSON.Lowers = append(configJSON.Lowers, DevConfigLower{
+		Digest: lowerDigest,
 		Size:   size,
-		Dir:    path.Join(dir, zdfsMetaDir),
+		Dir:    path.Join(metaDir, zdfsMetaDir),
 	})
 
-	return atomicWriteOverlaybdTargetConfig(dir, &configJSON)
+	return atomicWriteOverlaybdTargetConfig(idDir, &configJSON)
 }
 
 func atomicWriteOverlaybdTargetConfig(dir string, configJSON *DevConfig) error {
@@ -150,14 +175,15 @@ func Create(id, parent, idDir, parentDir string, rootUID, rootGID int) error {
 		if err != nil {
 			return err
 		}
+		var configJSON DevConfig
 		configJSON.RepoBlobURL = parentConfJSON.RepoBlobURL
 		configJSON.Lowers = parentConfJSON.Lowers
 		configJSON.Upper = DevConfigUpper{
 			Index: path.Join(metaDir, idxFile),
 			Data:  path.Join(metaDir, dataFile),
 		}
-		configJSON.ResultFile: path.Join(metaDir, "result")
-		atomicWriteOverlaybdTargetConfig(dir, &configJSON)
+		configJSON.ResultFile = path.Join(metaDir, "result")
+		atomicWriteOverlaybdTargetConfig(idDir, &configJSON)
 	}
 
 	return ioutil.WriteFile(path.Join(metaDir, iNewFormat), []byte(" "), 0666)
@@ -169,15 +195,15 @@ func Get(idDir string) (string, error) {
 		mylog.Infof("LSMD leave Get(idDir:%s)", idDir)
 	}()
 
-	initDir := dir
-	if !strings.HasSuffix(dir, "-init") {
-		initDir = dir + "-init"
+	initDir := idDir
+	if !strings.HasSuffix(idDir, "-init") {
+		initDir = idDir + "-init"
 	}
 	target := getDadiMerged(initDir)
 	if err := idtools.MkdirAndChown(target, 0700, idtools.Identity{UID: rootUID, GID: rootGID}); err != nil {
 		return "", err
 	}
-	err := CreateDeviceAndMount(getMetaDir(initDir), overlaybdConfPath(dir), target)
+	err := CreateDeviceAndMount(getMetaDir(initDir), overlaybdConfPath(idDir), target)
 	if err != nil {
 		return "", err
 	}
@@ -198,7 +224,6 @@ func Put(idDir string) error {
 	initDir := idDir + "-init"
 	return UnmountAndDestoryDev(getMetaDir(initDir), getDadiMerged(initDir))
 }
-
 
 func createRWLayer(dir string) error {
 	cmd := exec.Command("/opt/overlaybd/bin/overlaybd-create", path.Join(dir, dataFile), path.Join(dir, idxFile), "256")
