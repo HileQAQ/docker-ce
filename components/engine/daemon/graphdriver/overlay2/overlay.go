@@ -17,6 +17,7 @@ import (
 
 	"github.com/docker/docker/daemon/graphdriver"
 	"github.com/docker/docker/daemon/graphdriver/overlayutils"
+	"github.com/docker/docker/daemon/graphdriver/zdfs"
 	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/chrootarchive"
 	"github.com/docker/docker/pkg/containerfs"
@@ -405,6 +406,14 @@ func (d *Driver) create(id, parent string, opts *graphdriver.CreateOpts) (retErr
 	if err != nil {
 		return err
 	}
+
+	parentDir := d.dir(parent)
+	if zdfs.IsZdfsLayer(parentDir) {
+		if err := zdfs.Create(id, parent, dir, parentDir, rootUID, rootGID); err != nil {
+			return fmt.Errorf("DADI ERROR: %s", err)
+		}
+	}
+
 	if lower != "" {
 		if err := ioutil.WriteFile(path.Join(dir, lowerFile), []byte(lower), 0666); err != nil {
 			return err
@@ -489,6 +498,14 @@ func (d *Driver) Remove(id string) error {
 	d.locker.Lock(id)
 	defer d.locker.Unlock(id)
 	dir := d.dir(id)
+
+	isZdfs := zdfs.IsZdfsLayer(dir)
+	if isZdfs {
+		if err := zdfs.Remove(id, d.dir(id)); err != nil {
+			return fmt.Errorf("DADI ERROR: %s", err)
+		}
+	}
+
 	lid, err := ioutil.ReadFile(path.Join(dir, "link"))
 	if err == nil {
 		if len(lid) == 0 {
@@ -552,6 +569,17 @@ func (d *Driver) Get(id, mountLabel string) (_ containerfs.ContainerFS, retErr e
 		readonly = true
 	} else if !os.IsNotExist(err) {
 		return nil, err
+	}
+
+	absLowerDirs := strings.Join(absLowers, ":")
+
+	isZdfs := zdfs.IsZdfsLayer(dir)
+	if isZdfs {
+		dadiTarget, err := zdfs.Get(dir)
+		if err != nil {
+			return nil, fmt.Errorf("DADI ERROR: %s", err)
+		}
+		return containerfs.NewLocalContainerFS(dadiTarget)
 	}
 
 	var opts string
@@ -634,6 +662,12 @@ func (d *Driver) Put(id string) error {
 	if err := unix.Unmount(mountpoint, unix.MNT_DETACH); err != nil {
 		logger.Debugf("Failed to unmount %s overlay: %s - %v", id, mountpoint, err)
 	}
+
+	isZdfs := zdfs.IsZdfsLayer(dir)
+	if isZdfs {
+		zdfs.Put(dir)
+	}
+
 	// Remove the mountpoint here. Removing the mountpoint (in newer kernels)
 	// will cause all other instances of this mount in other mount namespaces
 	// to be unmounted. This is necessary to avoid cases where an overlay mount
@@ -692,6 +726,17 @@ func (d *Driver) ApplyDiff(id string, parent string, diff io.Reader) (size int64
 		WhiteoutFormat: archive.OverlayWhiteoutFormat,
 	}); err != nil {
 		return 0, err
+	}
+
+	if zdfs.IsZdfsLayerInApplyDiff(d.dir(id), parent, d.dir(parent)) {
+		rootUID, rootGID, err := idtools.GetRootUIDGID(d.uidMaps, d.gidMaps)
+		if err != nil {
+			logrus.Errorf("LSMD ERROR call idtools.GetRootUIDGID(..) in ApplyDiff(%s) err:%s", id, err)
+			return 0, fmt.Errorf("DADI ERROR: %s", err)
+		}
+		if err = zdfs.ApplyDiff(d.dir(id), parent, rootUID, rootGID); err != nil {
+			return 0, fmt.Errorf("DADI ERROR: %s", err)
+		}
 	}
 
 	return directory.Size(context.TODO(), applyDir)
