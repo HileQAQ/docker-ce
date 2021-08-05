@@ -1,7 +1,9 @@
 package zdfs
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -11,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/opencontainers/go-digest"
 	"github.com/sirupsen/logrus"
 )
 
@@ -19,11 +22,11 @@ func getDiffDir(dir string) string {
 }
 
 func getDadiMerged(dir string) string {
-	return path.Join(dir, dadiMerged)
+	return path.Join(dir, "zdfsmerged")
 }
 
 func getMetaDir(dir string) string {
-	return path.Join(dir, dadiMetaDir)
+	return path.Join(dir, "zdfsmeta")
 }
 
 func pathExists(path string) bool {
@@ -47,7 +50,7 @@ func execCmd(str string) error {
 }
 
 func copyMetaFiles(srcDir, dstDir string) error {
-	files := []string{zdfsOssurlFile, zdfsOssDataSizeFile, zdfsChecksumFile, iNewFormat}
+	files := []string{zdfsOssurlFile, zdfsOssDataSizeFile, zdfsChecksumFile, iNewFormat, zdfsOssTypeFile}
 	for _, name := range files {
 		data, err := ioutil.ReadFile(path.Join(srcDir, name))
 		if err != nil {
@@ -100,7 +103,7 @@ func IsZdfsLayer(dir string) bool {
 func hasZdfsFlagFiles(dir string, inApplyDiff bool) bool {
 	fileNames := []string{iNewFormat}
 	if inApplyDiff {
-		fileNames = []string{iNewFormat, zdfsChecksumFile, zdfsOssurlFile, zdfsOssDataSizeFile, zdfsOssTypeFile}
+		fileNames = []string{iNewFormat}
 	}
 	for _, name := range fileNames {
 		if !pathExists(path.Join(dir, name)) {
@@ -134,4 +137,128 @@ func getSha256FromOssurlFile(ossUrlFilePath string) (string, error) {
 	}
 
 	return strs[len(strs)-1], nil
+}
+
+func moveFiles(srcDir, dstDir string, files []string) error {
+	mylog.Infof("enter-> moveFiles(src: %s, dst: %s)", srcDir, dstDir)
+	defer func() {
+		mylog.Infof("<-leave moveFiles(src: %s, dst: %s)", srcDir, dstDir)
+	}()
+	for _, name := range files {
+		data, err := ioutil.ReadFile(path.Join(srcDir, name))
+		if err != nil {
+			mylog.Errorf("read error! : %v", err)
+			return err
+		}
+		if err := ioutil.WriteFile(path.Join(dstDir, name), data, 0666); err != nil {
+			mylog.Errorf("write error! : %v", err)
+			return err
+		}
+		if err := os.Remove(path.Join(srcDir, name)); err != nil {
+			mylog.Errorf("del error! : %v", err)
+			return err
+		}
+		mylog.Infof("move success: %s", name)
+	}
+	return nil
+}
+
+func compress(dir string) (digest.Digest, int64, error) {
+	mylog.Infof("enter-> compress(dir: %s)", dir)
+	defer func() {
+		mylog.Infof("<-leave compress(dir: %s)", dir)
+	}()
+	dadiBlob := path.Join(dir, zdfsCommitFile)
+	compressed := path.Join(dir, zdfsCommitFileComp)
+	cmd := exec.Command("/opt/overlaybd/bin/overlaybd-zfile", dadiBlob, compressed)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		logrus.Errorf("overlaybd-commit output: %s, err: %v", out, err)
+		return "", 0, err
+	}
+	file, err := os.Open(compressed)
+	if err != nil {
+		return "", 0, err
+	}
+	defer file.Close()
+
+	h := sha256.New()
+	size, err := io.Copy(h, file)
+	if err != nil {
+		return "", 0, err
+	}
+	dgst := digest.NewDigest(digest.SHA256, h)
+
+	return dgst, size, nil
+}
+
+// generate .aaaaaaaaaaaaaaaa.lsmt, .oss_url, .type, .checksum, .data_size in idDir/diff
+// generate .commit in idDir/meta
+// the oss_url has only "sha256:dgst" because I can't get reg.URL and repo in container layer
+func generateCommit(idDir string) (string, error) {
+	metaDir := getMetaDir(idDir)
+	diffDir := getDiffDir(idDir)
+	mylog.Infof("enter-> generateCommit(idDir: %s)", metaDir)
+	defer func() {
+		mylog.Infof("<-leave generateCommit(idDir: %s)", metaDir)
+	}()
+	// create .commit
+	if err := commit(metaDir); err != nil {
+		mylog.Errorf("Create .commit failed")
+		return "", err
+	}
+	// Compress .commit_file.zfile
+	dgst, size, err := compress(metaDir)
+	if err != nil {
+		mylog.Errorf("Compress .commit_file.zfile failed")
+		return "", err
+	}
+	// delete .commit
+	if err := os.Remove(path.Join(metaDir, zdfsCommitFile)); err != nil {
+		mylog.Errorf("del error! : %v", err)
+		return "", err
+	}
+	// rename .commit
+	if err := os.Rename(path.Join(metaDir, zdfsCommitFileComp), path.Join(metaDir, zdfsCommitFile)); err != nil {
+		mylog.Errorf("rename failed: %v", err)
+		return "", err
+	} else {
+		mylog.Infof("rename success: %s to %s", path.Join(metaDir, zdfsCommitFileComp), zdfsCommitFile)
+	}
+
+	// iNewFormat
+	err = ioutil.WriteFile(path.Join(diffDir, iNewFormat), []byte(" "), 0666)
+	if err != nil {
+		return "", err
+	}
+
+	// oss_url
+	url := string(dgst)
+	mylog.Infof("oss_url: %s", url)
+	err = ioutil.WriteFile(path.Join(diffDir, zdfsOssurlFile), []byte(url), 0666)
+	if err != nil {
+		return "", err
+	}
+
+	// checksum file
+	blob := path.Join(metaDir, zdfsCommitFile)
+	cmd := exec.Command("/opt/overlaybd/bin/zchecksum", "generate", "-s 262144", blob, path.Join(diffDir, zdfsChecksumFile))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		mylog.Errorf("overlaybd-checksum output: %s, ", string(output))
+		return "", err
+	}
+
+	// size
+	err = ioutil.WriteFile(path.Join(diffDir, zdfsOssDataSizeFile), []byte(strconv.FormatUint(uint64(size), 10)), 0666)
+	if err != nil {
+		return "", err
+	}
+
+	// type
+	if err := ioutil.WriteFile(path.Join(diffDir, zdfsOssTypeFile), []byte("oss"), 0666); err != nil {
+		return "", err
+	}
+
+	return url[7:], nil
 }

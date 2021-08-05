@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -103,6 +104,18 @@ type Driver struct {
 	naiveDiff     graphdriver.DiffDriver
 	supportsDType bool
 	locker        *locker.Locker
+}
+
+func logStr(format string, v ...interface{}) string {
+	module := "[DADI]"
+	if _, file, line, ok := runtime.Caller(2); ok {
+		if i := strings.LastIndex(file, "/"); i > 0 {
+			file = file[i+1:]
+		}
+		return fmt.Sprintf(module+file+":"+strconv.Itoa(line)+" "+format, v...)
+	} else {
+		return fmt.Sprintf(module+format, v...)
+	}
 }
 
 var (
@@ -274,6 +287,10 @@ func (d *Driver) Status() [][2]string {
 // GetMetadata returns metadata about the overlay driver such as the LowerDir,
 // UpperDir, WorkDir, and MergeDir used to store data.
 func (d *Driver) GetMetadata(id string) (map[string]string, error) {
+	logrus.Infof("enter-> GetMetadata(id: %s)", id)
+	defer func() {
+		logrus.Infof("<-leave GetMetadata(id: %s)", id)
+	}()
 	dir := d.dir(id)
 	if _, err := os.Stat(dir); err != nil {
 		return nil, err
@@ -306,6 +323,10 @@ func (d *Driver) Cleanup() error {
 // CreateReadWrite creates a layer that is writable for use as a container
 // file system.
 func (d *Driver) CreateReadWrite(id, parent string, opts *graphdriver.CreateOpts) error {
+	logrus.Infof("enter-> CreateReadWrite(id: %s, parent: %s)", id, parent)
+	defer func() {
+		logrus.Infof("<-leave CreateReadWrite(id: %s, parent: %s)", id, parent)
+	}()
 	if opts == nil {
 		opts = &graphdriver.CreateOpts{
 			StorageOpt: make(map[string]string),
@@ -338,6 +359,7 @@ func (d *Driver) Create(id, parent string, opts *graphdriver.CreateOpts) (retErr
 }
 
 func (d *Driver) create(id, parent string, opts *graphdriver.CreateOpts) (retErr error) {
+	logrus.Infof("enter-> create(id:%s, parent:%s)", id, parent)
 	dir := d.dir(id)
 
 	rootUID, rootGID, err := idtools.GetRootUIDGID(d.uidMaps, d.gidMaps)
@@ -355,8 +377,10 @@ func (d *Driver) create(id, parent string, opts *graphdriver.CreateOpts) (retErr
 	}
 
 	defer func() {
+		logrus.Infof("<-leave create(id:%s)", id)
 		// Clean up on failure
 		if retErr != nil {
+			logrus.Infof("into removeAll %s, retErr %s", dir, retErr)
 			os.RemoveAll(dir)
 		}
 	}()
@@ -406,7 +430,6 @@ func (d *Driver) create(id, parent string, opts *graphdriver.CreateOpts) (retErr
 	if err != nil {
 		return err
 	}
-
 	parentDir := d.dir(parent)
 	if zdfs.IsZdfsLayer(parentDir) {
 		if err := zdfs.Create(id, parent, dir, parentDir, rootUID, rootGID); err != nil {
@@ -492,6 +515,10 @@ func (d *Driver) getLowerDirs(id string) ([]string, error) {
 
 // Remove cleans the directories that are created for this id.
 func (d *Driver) Remove(id string) error {
+	logrus.Infof("enter-> Remove(id: %s)", id)
+	defer func() {
+		logrus.Infof("<-leave Remove(id: %s)", id)
+	}()
 	if id == "" {
 		return fmt.Errorf("refusing to remove the directories: id is empty")
 	}
@@ -499,12 +526,12 @@ func (d *Driver) Remove(id string) error {
 	defer d.locker.Unlock(id)
 	dir := d.dir(id)
 
-	isZdfs := zdfs.IsZdfsLayer(dir)
-	if isZdfs {
-		if err := zdfs.Remove(id, d.dir(id)); err != nil {
-			return fmt.Errorf("DADI ERROR: %s", err)
-		}
-	}
+	// isZdfs := zdfs.IsZdfsLayer(dir)
+	// if isZdfs {
+	// 	if err := zdfs.Remove(id, d.dir(id)); err != nil {
+	// 		return fmt.Errorf("DADI ERROR: %s", err)
+	// 	}
+	// }
 
 	lid, err := ioutil.ReadFile(path.Join(dir, "link"))
 	if err == nil {
@@ -523,6 +550,7 @@ func (d *Driver) Remove(id string) error {
 
 // Get creates and mounts the required file system for the given id and returns the mount path.
 func (d *Driver) Get(id, mountLabel string) (_ containerfs.ContainerFS, retErr error) {
+	logrus.Infof("enter-> Get(id: %s)", id)
 	d.locker.Lock(id)
 	defer d.locker.Unlock(id)
 	dir := d.dir(id)
@@ -545,7 +573,9 @@ func (d *Driver) Get(id, mountLabel string) (_ containerfs.ContainerFS, retErr e
 		return containerfs.NewLocalContainerFS(mergedDir), nil
 	}
 	defer func() {
+		logrus.Infof("<-leave Get(id: %s)", id)
 		if retErr != nil {
+			logrus.Infof("retErr: %s", retErr)
 			if c := d.ctr.Decrement(mergedDir); c <= 0 {
 				if mntErr := unix.Unmount(mergedDir, 0); mntErr != nil {
 					logger.Errorf("error unmounting %v: %v", mergedDir, mntErr)
@@ -571,15 +601,15 @@ func (d *Driver) Get(id, mountLabel string) (_ containerfs.ContainerFS, retErr e
 		return nil, err
 	}
 
-	absLowerDirs := strings.Join(absLowers, ":")
+	rootUID, rootGID, err := idtools.GetRootUIDGID(d.uidMaps, d.gidMaps)
 
 	isZdfs := zdfs.IsZdfsLayer(dir)
 	if isZdfs {
-		dadiTarget, err := zdfs.Get(dir)
+		dadiTarget, err := zdfs.Get(dir, rootUID, rootGID)
 		if err != nil {
 			return nil, fmt.Errorf("DADI ERROR: %s", err)
 		}
-		return containerfs.NewLocalContainerFS(dadiTarget)
+		return containerfs.NewLocalContainerFS(dadiTarget), nil
 	}
 
 	var opts string
@@ -593,7 +623,6 @@ func (d *Driver) Get(id, mountLabel string) (_ containerfs.ContainerFS, retErr e
 	mount := unix.Mount
 	mountTarget := mergedDir
 
-	rootUID, rootGID, err := idtools.GetRootUIDGID(d.uidMaps, d.gidMaps)
 	if err != nil {
 		return nil, err
 	}
@@ -643,6 +672,10 @@ func (d *Driver) Get(id, mountLabel string) (_ containerfs.ContainerFS, retErr e
 // It also removes the 'merged' directory to force the kernel to unmount the
 // overlay mount in other namespaces.
 func (d *Driver) Put(id string) error {
+	logrus.Infof("enter-> Put(id: %s)", id)
+	defer func() {
+		logrus.Infof("<-leave Put(id: %s)", id)
+	}()
 	d.locker.Lock(id)
 	defer d.locker.Unlock(id)
 	dir := d.dir(id)
@@ -711,13 +744,18 @@ func (d *Driver) isParent(id, parent string) bool {
 
 // ApplyDiff applies the new layer into a root
 func (d *Driver) ApplyDiff(id string, parent string, diff io.Reader) (size int64, err error) {
+	logrus.Infof("enter-> ApplyDiff(id: %s, parent: %s)", id, parent)
+	defer func() {
+		logrus.Infof("<-leave ApplyDiff(id: %s, parent: %s)", id, parent)
+	}()
 	if useNaiveDiff(d.home) || !d.isParent(id, parent) {
+		logrus.Infof("branch Naive in ApplyDiff")
 		return d.naiveDiff.ApplyDiff(id, parent, diff)
 	}
 
 	// never reach here if we are running in UserNS
 	applyDir := d.getDiffPath(id)
-
+	logrus.Infof("Applying tar in %s", applyDir)
 	logger.Debugf("Applying tar in %s", applyDir)
 	// Overlay doesn't need the parent id to apply the diff
 	if err := untar(diff, applyDir, &archive.TarOptions{
@@ -734,7 +772,7 @@ func (d *Driver) ApplyDiff(id string, parent string, diff io.Reader) (size int64
 			logrus.Errorf("LSMD ERROR call idtools.GetRootUIDGID(..) in ApplyDiff(%s) err:%s", id, err)
 			return 0, fmt.Errorf("DADI ERROR: %s", err)
 		}
-		if err = zdfs.ApplyDiff(d.dir(id), parent, rootUID, rootGID); err != nil {
+		if err = zdfs.ApplyDiff(d.dir(id), parent, d.dir(parent), rootUID, rootGID); err != nil {
 			return 0, fmt.Errorf("DADI ERROR: %s", err)
 		}
 	}
@@ -761,12 +799,38 @@ func (d *Driver) DiffSize(id, parent string) (size int64, err error) {
 // Diff produces an archive of the changes between the specified
 // layer and its parent layer which may be "".
 func (d *Driver) Diff(id, parent string) (io.ReadCloser, error) {
+	logrus.Infof("enter-> Diff(id: %s, parent: %s)", id, parent)
+	defer func() {
+		logrus.Infof("<-leave Diff(id: %s, parent: %s)", id, parent)
+	}()
+	if zdfs.IsZdfsLayer(d.dir(id)) {
+		logrus.Infof("branch zdfs.Diff")
+		id = id + "-init"
+		rootUID, rootGID, err := idtools.GetRootUIDGID(d.uidMaps, d.gidMaps)
+		if err != nil {
+			logrus.Errorf("LSMD ERROR call idtools.GetRootUIDGID(..) in ApplyDiff(%s) err:%s", id, err)
+			return nil, fmt.Errorf("DADI ERROR: %s", err)
+		}
+		zdfs.Diff(d.dir(id), rootUID, rootGID)
+		diffPath := d.getDiffPath(id)
+		logrus.Infof("diffPath: %s", diffPath)
+		logger.Debugf("Tar with options on %s", diffPath)
+		return archive.TarWithOptions(diffPath, &archive.TarOptions{
+			Compression:    archive.Uncompressed,
+			UIDMaps:        d.uidMaps,
+			GIDMaps:        d.gidMaps,
+			WhiteoutFormat: archive.OverlayWhiteoutFormat,
+		})
+	}
+
 	if useNaiveDiff(d.home) || !d.isParent(id, parent) {
+		logrus.Infof("branch naiveDiff")
 		return d.naiveDiff.Diff(id, parent)
 	}
 
 	// never reach here if we are running in UserNS
 	diffPath := d.getDiffPath(id)
+	logrus.Infof("diffPath: %s", diffPath)
 	logger.Debugf("Tar with options on %s", diffPath)
 	return archive.TarWithOptions(diffPath, &archive.TarOptions{
 		Compression:    archive.Uncompressed,

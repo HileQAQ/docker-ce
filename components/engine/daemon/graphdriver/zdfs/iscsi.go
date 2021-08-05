@@ -48,11 +48,24 @@ type DadiIscsiDev struct {
 	naa string
 }
 
+var mylog *MyLog
+
+func checkPathExist(dir string) error {
+	if pathExists(dir) {
+		mylog.Infof("path exist: %s", dir)
+	} else {
+		mylog.Infof("path not found: %s", dir)
+	}
+	return nil
+}
+
 func CreateDeviceAndMount(dir, configPath, mountPoint string) (retErr error) {
 	idStr := xid.New().String()
 	naaStr := NewNaaName()
+	mylog.Infof("-> enter CreateDeviceAndMount(dir: %s, configPath: %s, mountPoint: %s)", dir, configPath, mountPoint)
 
 	defer func() {
+		mylog.Infof("<- leave CreateDeviceAndMount(dir: %s, configPath: %s, mountPoint: %s)", dir, configPath, mountPoint)
 		if retErr != nil {
 			logrus.Infof("clear after CreateIscsiDev failed")
 			if err := UnmountAndDestoryDev(dir, mountPoint); err != nil {
@@ -65,6 +78,8 @@ func CreateDeviceAndMount(dir, configPath, mountPoint string) (retErr error) {
 	ioutil.WriteFile(path.Join(dir, "devnaa"), ([]byte)(naaStr), 0666)
 
 	devDir := fmt.Sprintf("/sys/kernel/config/target/core/user_%d/dev_%s", hbaNum, idStr)
+	checkPathExist(path.Join(devDir, "control"))
+	checkPathExist(path.Join(devDir, "enable"))
 	err := os.MkdirAll(devDir, 0700)
 	if err != nil {
 		logrus.Errorf("error create target dir %v", err)
@@ -79,6 +94,7 @@ func CreateDeviceAndMount(dir, configPath, mountPoint string) (retErr error) {
 
 	err = ioutil.WriteFile(path.Join(devDir, "enable"), ([]byte)("1"), 0666)
 	if err != nil {
+		checkPathExist(path.Join(devDir, "enable"))
 		logrus.Errorf("error write target enable %v", err)
 		return err
 	}
@@ -147,6 +163,10 @@ func CreateDeviceAndMount(dir, configPath, mountPoint string) (retErr error) {
 }
 
 func UnmountAndDestoryDev(dir, mountPoint string) error {
+	mylog.Infof("-> enter UnmountAndDestoryDev(dir: %s, mountPoint: %s)", dir, mountPoint)
+	defer func() {
+		mylog.Infof("<- leave UnmountAndDestoryDev(dir: %s, mountPoint: %s)", dir, mountPoint)
+	}()
 	idStr, _ := getTrimStringFromFile(path.Join(dir, "devid"))
 	naaStr, _ := getTrimStringFromFile(path.Join(dir, "devnaa"))
 
@@ -188,5 +208,6 @@ func UnmountAndDestoryDev(dir, mountPoint string) error {
 		logrus.Errorf("error remove target %v", err)
 		return err
 	}
+	mylog.Infof("remove success: /sys/kernel/config/target/core/user_%d/dev_%s", hbaNum, idStr)
 	return nil
 }
