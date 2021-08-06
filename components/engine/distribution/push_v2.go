@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"runtime"
 	"sort"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/docker/distribution/registry/api/errcode"
 	"github.com/docker/distribution/registry/client"
 	apitypes "github.com/docker/docker/api/types"
+	"github.com/docker/docker/daemon/graphdriver/zdfs"
 	"github.com/docker/docker/distribution/metadata"
 	"github.com/docker/docker/distribution/xfer"
 	"github.com/docker/docker/layer"
@@ -149,6 +151,13 @@ func (p *v2Pusher) pushV2Tag(ctx context.Context, ref reference.NamedTagged, id 
 	for range rootfs.DiffIDs {
 		descriptor := descriptorTemplate
 		descriptor.layer = l
+		dir := zdfs.GetLayerCacheDir(l.ChainID())
+		if zdfs.IsZdfsLayer(dir) {
+			discriptor.dadiDir = dir
+		} else {
+			discriptor.dadiDir = ""
+		}
+
 		descriptor.checkedDigests = make(map[digest.Digest]struct{})
 		descriptors = append(descriptors, &descriptor)
 
@@ -263,6 +272,7 @@ type v2PushDescriptor struct {
 	remoteDescriptor  distribution.Descriptor
 	// a set of digests whose presence has been checked in a target repository
 	checkedDigests map[digest.Digest]struct{}
+	dadiDir        string
 }
 
 func (pd *v2PushDescriptor) Key() string {
@@ -285,6 +295,31 @@ func (pd *v2PushDescriptor) Upload(ctx context.Context, progressOutput progress.
 				progress.Update(progressOutput, pd.ID(), "Skipped foreign layer")
 				return d, nil
 			}
+		}
+	}
+
+	if pd.dadiDir != "" {
+		data, err := os.Open(path.Join(pd.dadiDir, "zdfsmeta", ".commit"))
+		if err != nil {
+			return err
+		}
+		defer data.Close()
+
+		bs := pd.repo.Blobs(ctx)
+		layerUpload, err := bs.Create(ctx)
+		if err != nil {
+			return err
+		}
+		layerUpload.ReadFrom(data)
+
+		//digest 已经计算过，从ossurl取
+		d, err := GetSha256FromOssurlFile(path.Join("diff", zdfsOssurlFile))
+		if err != nil {
+			return err
+		}
+
+		if _, err := layerUpload.Commit(ctx, distribution.Descriptor{Digest: digest.Digest("sha256:" + d)}); err != nil {
+			return err
 		}
 	}
 

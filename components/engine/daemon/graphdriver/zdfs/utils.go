@@ -2,6 +2,7 @@ package zdfs
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -122,7 +123,7 @@ func getTrimStringFromFile(filePath string) (string, error) {
 	return strings.Trim(string(data), " \n"), nil //Trim函数会把string中首位含有的\n 空格字符都去掉。比如:"\n zxcvg  \n" --> "zxcvg"; " 1233 \n abc \n " --> "1233 \n abc",注意string当中的空格与\n不会去除
 }
 
-func getSha256FromOssurlFile(ossUrlFilePath string) (string, error) {
+func GetSha256FromOssurlFile(ossUrlFilePath string) (string, error) {
 	url, err := getTrimStringFromFile(ossUrlFilePath)
 	if err != nil {
 		return "", err
@@ -261,4 +262,23 @@ func generateCommit(idDir string) (string, error) {
 	}
 
 	return url[7:], nil
+}
+
+func GetLayerCacheDir(chainID string) (string, error) {
+	dgst := digest.Digest(chainID)
+	imgdbDir := path.Join(rootDir, "image", driverName, "layerdb")
+	layerPath := path.Join(imgdbDir, string(dgst.Algorithm()), dgst.Hex())
+	file := path.Join(layerPath, "cache-id")
+	logrus.Infof("LSMD GetLayerCacheDir cache-id: %s", file)
+	contentBytes, err := ioutil.ReadFile(file)
+	if err != nil {
+		return "", err
+	}
+	content := strings.TrimSpace(string(contentBytes))
+
+	if !stringIDRegexp.MatchString(content) {
+		return "", errors.New("invalid cache id value")
+	}
+	logrus.Infof("LSMD GetLayerCacheDir : %s", path.Join(rootDir, driverName, content))
+	return path.Join(rootDir, driverName, content), nil
 }
