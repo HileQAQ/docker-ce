@@ -19,6 +19,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/docker/docker/daemon/graphdriver/zdfs"
+
 	"github.com/docker/docker/pkg/fileutils"
 	"go.etcd.io/bbolt"
 	"google.golang.org/grpc"
@@ -995,6 +997,8 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 	if err := configureKernelSecuritySupport(config, d.graphDriver); err != nil {
 		return nil, err
 	}
+
+	zdfs.DADIInit(config.Root)
 
 	imageRoot := filepath.Join(config.Root, "image", d.graphDriver)
 	ifs, err := image.NewFSStoreBackend(filepath.Join(imageRoot, "imagedb"))

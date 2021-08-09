@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -17,6 +18,15 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/sirupsen/logrus"
 )
+
+var (
+	stringIDRegexp = regexp.MustCompile(`^[a-f0-9]{64}(-init)?$`)
+	rootDir        string
+)
+
+func DADIInit(root string) {
+	rootDir = root
+}
 
 func getDiffDir(dir string) string {
 	return path.Join(dir, "diff")
@@ -96,6 +106,18 @@ func logStr(format string, v ...interface{}) string {
 	}
 }
 
+func IsNewZdfsLayer(dir string) bool {
+	fileNames := []string{iNewFormat, zdfsCommitFile}
+	checkPathExist(path.Join(dir, iNewFormat))
+	checkPathExist(path.Join(dir, zdfsCommitFile))
+	for _, name := range fileNames {
+		if !pathExists(path.Join(dir, name)) {
+			return false
+		}
+	}
+	return true
+}
+
 //Can call this func only after first layer is downloaded and zdfsmeta dir has been created.
 func IsZdfsLayer(dir string) bool {
 	return hasZdfsFlagFiles(getMetaDir(dir), false)
@@ -138,6 +160,18 @@ func GetSha256FromOssurlFile(ossUrlFilePath string) (string, error) {
 	}
 
 	return strs[len(strs)-1], nil
+}
+
+func GetMetaInfo(dir string) (string, string, error) {
+	digest, err := GetSha256FromOssurlFile(path.Join(dir, zdfsMetaDir, zdfsOssurlFile))
+	if err != nil {
+		return "", "", err
+	}
+	size, err := getTrimStringFromFile(path.Join(dir, zdfsMetaDir, zdfsOssDataSizeFile))
+	if err != nil {
+		return "", "", err
+	}
+	return digest, size, nil
 }
 
 func moveFiles(srcDir, dstDir string, files []string) error {
@@ -195,7 +229,6 @@ func compress(dir string) (digest.Digest, int64, error) {
 
 // generate .aaaaaaaaaaaaaaaa.lsmt, .oss_url, .type, .checksum, .data_size in idDir/diff
 // generate .commit in idDir/meta
-// the oss_url has only "sha256:dgst" because I can't get reg.URL and repo in container layer
 func generateCommit(idDir string) (string, error) {
 	metaDir := getMetaDir(idDir)
 	diffDir := getDiffDir(idDir)
@@ -236,7 +269,22 @@ func generateCommit(idDir string) (string, error) {
 	// oss_url
 	url := string(dgst)
 	mylog.Infof("oss_url: %s", url)
-	err = ioutil.WriteFile(path.Join(diffDir, zdfsOssurlFile), []byte(url), 0666)
+	var ossUrl string
+	tmpDir := idDir
+	for !pathExists(path.Join(tmpDir, "zdfsmeta", zdfsOssurlFile)) {
+		pDir, err := ioutil.ReadFile(path.Join(tmpDir, "parent"))
+		if err != nil {
+			return "", err
+		}
+		mylog.Infof("pDir: %s", pDir)
+		tmpDir = string(pDir)
+	}
+	data, err := ioutil.ReadFile(path.Join(tmpDir, "zdfsmeta", zdfsOssurlFile))
+	tmp := string(data)
+	mylog.Infof("oss_url_t: %s", tmp)
+	ossUrl = tmp[:strings.Index(tmp, "sha256:")] + url
+	mylog.Infof("ossurl: %s, ossdir: %s", ossUrl, path.Join(diffDir, zdfsOssurlFile))
+	err = ioutil.WriteFile(path.Join(diffDir, zdfsOssurlFile), []byte(ossUrl), 0666)
 	if err != nil {
 		return "", err
 	}
@@ -266,7 +314,7 @@ func generateCommit(idDir string) (string, error) {
 
 func GetLayerCacheDir(chainID string) (string, error) {
 	dgst := digest.Digest(chainID)
-	imgdbDir := path.Join(rootDir, "image", driverName, "layerdb")
+	imgdbDir := path.Join(rootDir, "image", "overlay2", "layerdb")
 	layerPath := path.Join(imgdbDir, string(dgst.Algorithm()), dgst.Hex())
 	file := path.Join(layerPath, "cache-id")
 	logrus.Infof("LSMD GetLayerCacheDir cache-id: %s", file)
@@ -279,6 +327,6 @@ func GetLayerCacheDir(chainID string) (string, error) {
 	if !stringIDRegexp.MatchString(content) {
 		return "", errors.New("invalid cache id value")
 	}
-	logrus.Infof("LSMD GetLayerCacheDir : %s", path.Join(rootDir, driverName, content))
-	return path.Join(rootDir, driverName, content), nil
+	logrus.Infof("LSMD GetLayerCacheDir : %s", path.Join(rootDir, "overlay2", content))
+	return path.Join(rootDir, "overlay2", content), nil
 }

@@ -15,10 +15,11 @@ import (
 
 	"github.com/containerd/continuity"
 	// "github.com/docker/docker/pkg/archive"
+	// "github.com/docker/distribution"
+	// "github.com/docker/docker/reference"
 	"github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-
 	// "github.com/docker/docker/pkg/fileutils"
 	"github.com/docker/docker/pkg/idtools"
 )
@@ -77,15 +78,6 @@ func ApplyDiff(idDir, parent, parentDir string, rootUID, rootGID int) error {
 	metaDir := getMetaDir(idDir)
 	ossDir := path.Join(getDiffDir(idDir), zdfsOssurlFile)
 	dgst, _ := getTrimStringFromFile(ossDir)
-	mylog.Infof("metaDir: %s, ossDir: %s, digest: %s", metaDir, ossDir, dgst)
-	if strings.Index(dgst, "/") == -1 {
-		parentOss, _ := getTrimStringFromFile(path.Join(getMetaDir(parentDir), zdfsOssurlFile))
-		dgst = parentOss[:strings.Index(parentOss, "sha256:")] + dgst
-		f, _ := os.OpenFile(ossDir, os.O_RDWR|os.O_TRUNC|os.O_CREATE, 0766)
-		f.Write([]byte(dgst))
-		f.Close()
-	}
-	mylog.Infof("BlobUrl: %s", dgst)
 	if err := idtools.MkdirAndChown(metaDir, 0755, idtools.Identity{UID: rootUID, GID: rootGID}); err != nil {
 		return err
 	}
@@ -97,12 +89,14 @@ func ApplyDiff(idDir, parent, parentDir string, rootUID, rootGID int) error {
 	mylog.Infof("sha256: %s", dgst)
 	files := []string{zdfsCommitFile}
 	tmpDir := path.Join("/home", dgst)
-	moveFiles(tmpDir, metaDir, files)
-	if err := os.Remove(tmpDir); err != nil {
-		mylog.Errorf("del error! : %v", err)
-		return err
+	if pathExists(tmpDir) {
+		moveFiles(tmpDir, metaDir, files)
+		if err := os.Remove(tmpDir); err != nil {
+			mylog.Errorf("del error! : %v", err)
+			return err
+		}
+		mylog.Infof("Movefile success")
 	}
-	mylog.Infof("Movefile success")
 
 	configJSON := DevConfig{
 		Lowers: []DevConfigLower{},
@@ -184,6 +178,9 @@ func Create(id, parent, idDir, parentDir string, rootUID, rootGID int) error {
 	defer func() {
 		mylog.Infof("DADI leave Create(id:%s)", id)
 	}()
+
+	ioutil.WriteFile(path.Join(idDir, "parent"), []byte(parentDir), 0755)
+
 	// image layer
 	if strings.HasSuffix(id, "-init") == false && strings.HasSuffix(parent, "-init") == false {
 		return nil
@@ -230,7 +227,7 @@ func Get(idDir string, rootUID, rootGID int) (string, error) {
 		initDir = idDir + "-init"
 	}
 	target := getDadiMerged(initDir)
-	if err := idtools.MkdirAndChown(target, 0700, idtools.Identity{UID: rootUID, GID: rootGID}); err != nil {
+	if err := idtools.MkdirAllAndChown(target, 0700, idtools.Identity{UID: rootUID, GID: rootGID}); err != nil {
 		return "", err
 	}
 

@@ -31,6 +31,8 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+var mylog *zdfs.MyLog
+
 const (
 	smallLayerMaximumSize  = 100 * (1 << 10) // 100KB
 	middleLayerMaximumSize = 10 * (1 << 20)  // 10MB
@@ -151,11 +153,11 @@ func (p *v2Pusher) pushV2Tag(ctx context.Context, ref reference.NamedTagged, id 
 	for range rootfs.DiffIDs {
 		descriptor := descriptorTemplate
 		descriptor.layer = l
-		dir := zdfs.GetLayerCacheDir(l.ChainID())
-		if zdfs.IsZdfsLayer(dir) {
-			discriptor.dadiDir = dir
+		dir, _ := zdfs.GetLayerCacheDir(l.ChainID().String())
+		if zdfs.IsNewZdfsLayer(path.Join(dir, "zdfsmeta")) {
+			descriptor.dadiDir = dir
 		} else {
-			discriptor.dadiDir = ""
+			descriptor.dadiDir = ""
 		}
 
 		descriptor.checkedDigests = make(map[digest.Digest]struct{})
@@ -287,6 +289,28 @@ func (pd *v2PushDescriptor) DiffID() layer.DiffID {
 	return pd.layer.DiffID()
 }
 
+// llz set annotation
+func (pd *v2PushDescriptor) getAnnotation() (map[string]string, error) {
+	res := make(map[string]string)
+
+	diffID := pd.DiffID().String()
+	if diffID != "" {
+		dir, err := zdfs.GetLayerCacheDir(pd.layer.ChainID().String())
+		metaDir := path.Join(dir, "zdfsmeta")
+		if err == nil {
+			if zdfs.IsZdfsLayer(metaDir) || zdfs.IsNewZdfsLayer(metaDir) {
+				digest, size, err := zdfs.GetMetaInfo(dir)
+				if err != nil {
+					return res, err
+				}
+				res["dadi.image.layer.v1.digest"] = "sha256:" + digest
+				res["dadi.image.layer.v1.size"] = size
+			}
+		}
+	}
+	return res, nil
+}
+
 func (pd *v2PushDescriptor) Upload(ctx context.Context, progressOutput progress.Output) (distribution.Descriptor, error) {
 	// Skip foreign layers unless this registry allows nondistributable artifacts.
 	if !pd.endpoint.AllowNondistributableArtifacts {
@@ -301,25 +325,25 @@ func (pd *v2PushDescriptor) Upload(ctx context.Context, progressOutput progress.
 	if pd.dadiDir != "" {
 		data, err := os.Open(path.Join(pd.dadiDir, "zdfsmeta", ".commit"))
 		if err != nil {
-			return err
+			return distribution.Descriptor{}, err
 		}
 		defer data.Close()
 
 		bs := pd.repo.Blobs(ctx)
 		layerUpload, err := bs.Create(ctx)
 		if err != nil {
-			return err
+			return distribution.Descriptor{}, err
 		}
 		layerUpload.ReadFrom(data)
 
 		//digest 已经计算过，从ossurl取
-		d, err := GetSha256FromOssurlFile(path.Join("diff", zdfsOssurlFile))
+		d, err := zdfs.GetSha256FromOssurlFile(path.Join(pd.dadiDir, "diff", ".oss_url"))
 		if err != nil {
-			return err
+			return distribution.Descriptor{}, err
 		}
 
 		if _, err := layerUpload.Commit(ctx, distribution.Descriptor{Digest: digest.Digest("sha256:" + d)}); err != nil {
-			return err
+			return distribution.Descriptor{}, err
 		}
 	}
 
@@ -529,10 +553,16 @@ func (pd *v2PushDescriptor) uploadUsingSession(
 		return distribution.Descriptor{}, xfer.DoNotRetry{Err: err}
 	}
 
+	anno, err := pd.getAnnotation()
+	if err != nil {
+		return distribution.Descriptor{}, err
+	}
+
 	desc := distribution.Descriptor{
-		Digest:    pushDigest,
-		MediaType: schema2.MediaTypeLayer,
-		Size:      nn,
+		Digest:      pushDigest,
+		Annotations: anno,
+		MediaType:   schema2.MediaTypeLayer,
+		Size:        nn,
 	}
 
 	pd.pushState.Lock()

@@ -78,24 +78,33 @@ func CreateDeviceAndMount(dir, configPath, mountPoint string) (retErr error) {
 	ioutil.WriteFile(path.Join(dir, "devnaa"), ([]byte)(naaStr), 0666)
 
 	devDir := fmt.Sprintf("/sys/kernel/config/target/core/user_%d/dev_%s", hbaNum, idStr)
-	checkPathExist(path.Join(devDir, "control"))
-	checkPathExist(path.Join(devDir, "enable"))
-	err := os.MkdirAll(devDir, 0700)
+	// mylog.Infof("[debug0]")
+	// checkPathExist(path.Join(devDir, "control"))
+	// checkPathExist(path.Join(devDir, "enable"))
+	err := os.MkdirAll(devDir, 0666)
 	if err != nil {
 		logrus.Errorf("error create target dir %v", err)
 		return err
 	}
+	// mylog.Infof("[debug1]")
+	// checkPathExist(path.Join(devDir, "control"))
+	// checkPathExist(path.Join(devDir, "enable"))
+	// checkPathExist(devDir)
 
 	err = ioutil.WriteFile(path.Join(devDir, "control"), ([]byte)(fmt.Sprintf("dev_config=%s/%s", "overlaybd", configPath)), 0666)
 	if err != nil {
+		checkPathExist(path.Join(devDir, "control"))
 		logrus.Errorf("error write target config %v", err)
 		return err
 	}
+	// mylog.Infof("[debug2]")
+	// checkPathExist(path.Join(devDir, "control"))
+	// checkPathExist(path.Join(devDir, "enable"))
 
 	err = ioutil.WriteFile(path.Join(devDir, "enable"), ([]byte)("1"), 0666)
 	if err != nil {
 		checkPathExist(path.Join(devDir, "enable"))
-		logrus.Errorf("error write target enable %v", err)
+		mylog.Errorf("error write target enable %v", err)
 		return err
 	}
 

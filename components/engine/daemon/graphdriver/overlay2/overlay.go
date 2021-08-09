@@ -36,6 +36,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+var mylog *zdfs.MyLog
 var (
 	// untar defines the untar method
 	untar = chrootarchive.UntarUncompressed
@@ -129,6 +130,11 @@ var (
 	indexOff  string
 	userxattr string
 )
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
 
 func init() {
 	graphdriver.Register(driverName, Init)
@@ -602,14 +608,18 @@ func (d *Driver) Get(id, mountLabel string) (_ containerfs.ContainerFS, retErr e
 	}
 
 	rootUID, rootGID, err := idtools.GetRootUIDGID(d.uidMaps, d.gidMaps)
-
-	isZdfs := zdfs.IsZdfsLayer(dir)
-	if isZdfs {
-		dadiTarget, err := zdfs.Get(dir, rootUID, rootGID)
-		if err != nil {
-			return nil, fmt.Errorf("DADI ERROR: %s", err)
+	if zdfs.IsZdfsLayer(dir) {
+		var parentDir []byte
+		if pathExists(path.Join(dir, "parent")) {
+			parentDir, err = ioutil.ReadFile(path.Join(dir, "parent"))
 		}
-		return containerfs.NewLocalContainerFS(dadiTarget), nil
+		if strings.HasSuffix(dir, "-init") || strings.HasSuffix(string(parentDir), "-init") {
+			dadiTarget, err := zdfs.Get(dir, rootUID, rootGID)
+			if err != nil {
+				return nil, fmt.Errorf("DADI ERROR: %s", err)
+			}
+			return containerfs.NewLocalContainerFS(dadiTarget), nil
+		}
 	}
 
 	var opts string
